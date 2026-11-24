@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>ASCII Flowers</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas#view { display: block; width: 100%; height: 100%; }
+  #hint {
+    position: fixed; bottom: 12px; left: 0; right: 0; text-align: center;
+    font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+    color: rgba(255,255,255,.4); pointer-events: none; transition: opacity 1.5s;
+  }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hint">tap / click to start over</div>
+
+<script>
+// ------------------------------------------------------------
+//  Colored ASCII bouquet
+//  - one flower climbs up on a long stem, then a vase rises under it
+//    and a dense bouquet fills in around it
+//  - the whole bouquet spins 360 degrees (real 3D rotation around the
+//    vertical axis, flowers are sorted by depth and foreshortened)
+//  - a hidden canvas is drawn, shrunk to 1 px per character and then
+//    every pixel becomes a colored character
+// ------------------------------------------------------------
+const view = document.getElementById('view');
+const vctx = view.getContext('2d');
+const off = document.createElement('canvas');
+const octx = off.getContext('2d');
+const mid = document.createElement('canvas');
+const mctx = mid.getContext('2d');
+const small = document.createElement('canvas');
+const sctx = small.getContext('2d', { willReadFrequently: true });
+
+const RAMP = " .'`,:;!i><~+_-?]}1|/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const ease = t => t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+const easeOut = t => 1 - Math.pow(1 - t, 3);
+
+let W, H, DPR, fs, charW, charH, cols, rows, ow, oh, u, cx, baseY;
+
+function layout() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  view.width = W * DPR; view.height = H * DPR;
+  vctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+  fs = clamp(Math.round(H / 85), 7, 13);
+  vctx.font = `${fs}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
+  charW = vctx.measureText('M').width;
+  charH = fs * 1.15;
+  cols = Math.floor(W / charW);
+  rows = Math.floor(H / charH);
+
+  ow = cols * 4;
+  oh = Math.round(rows * 4 * (charH / charW));
+  off.width = ow; off.height = oh;
+  mid.width = cols * 2; mid.height = Math.round(oh / 2);
+  small.width = cols; small.height = rows;
+
+  const bh = Math.min(oh * 0.88, (ow / 0.62) * 0.88);
+  u = bh / 100;
+  cx = ow / 2;
+  baseY = oh * 0.95;
+}
+window.addEventListener('resize', layout);
+layout();
+
+// ------------------------------------------------------------
+//  Timeline (seconds)
+// ------------------------------------------------------------
+const VASE_H = 30;
+const T_VASE = 4.6;         // vase starts rising
+const T_VASE_DUR = 2.0;
+const T_BOUQUET = 6.8;      // the other flowers start
+const T_SPIN = 5.5;         // rotation starts
+const SPIN_PERIOD = 14;     // seconds per full 360 degree turn
+
+const PALETTES = [
+  [330, 350, 290, 220, 45],
+  [20, 45, 5, 340, 280],
+  [200, 220, 260, 300, 180],
+  [350, 330, 310, 15, 50],
+];
+let bouquet, t0;
+
+function newBouquet() {
+  const pal = PALETTES[Math.floor(Math.random() * PALETTES.length)];
+  const N = 20;                                         // number of flowers
+  const availW = ow / u;
+  const R = Math.min(27, availW * 0.47 - 9);           // dome radius
+  const Ry = 26, cy = 46;
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const flowers = [];
+
+  for (let i = 0; i < N; i++) {
+    let hx, hy, hz, nx, ny, nz;
+    if (i === 0) {                                       // the first, lone flower
+      hx = 0; hy = cy + Ry; hz = 0;
+      nx = 0; ny = 0.6; nz = 0.8;
+    } else {
+      const frac = (i - 0.5) / N;
+      const psi = Math.acos(1 - frac * 1.55);            // dome, a bit below equator
+      const phi = i * golden;
+      nx = Math.sin(psi) * Math.cos(phi);
+      ny = Math.cos(psi);
+      nz = Math.sin(psi) * Math.sin(phi);
+      hx = nx * R; hy = cy + ny * Ry; hz = nz * R;
+      const l = Math.hypot(nx, ny, nz); nx /= l; ny /= l; nz /= l;
+    }
+    const roll = Math.random();
+    const type = i === 0 ? 'rose' : roll < 0.55 ? 'rose' : roll < 0.82 ? 'daisy' : 'cluster';
+    flowers.push({
+      hero: i === 0,
+      p0: i === 0 ? [0, 0, 0] : [rand(-3, 3), VASE_H - 4, rand(-3, 3)],
+      p2: [hx, hy, hz],
+      n: [nx, ny, nz],
+      type,
+      hue: pal[i === 0 ? 0 : Math.floor(Math.random() * pal.length)] + rand(-10, 10),
+      sat: rand(65, 95), light: rand(46, 60),
+      r: i === 0 ? 12 : rand(6, 9),
+      rot: rand(0, 6.28), phase: rand(0, 6.28),
+      leaves: [
+        { t: rand(0.3, 0.5), side: -1, len: rand(6, 10) },
+        { t: rand(0.55, 0.8), side: 1, len: rand(6, 10) },
+      ],
+      dots: Array.from({ length: 16 }, () => ({
+        a: rand(0, 6.28), d: Math.sqrt(Math.random()), s: rand(0.22, 0.38), h: rand(-14, 14)
+      })),
+    });
+  }
+
+  // timing: hero first, then the rest in random order
+  flowers[0].delay = 0.4; flowers[0].grow = 4.5;
+  const rest = flowers.slice(1).sort(() => Math.random() - 0.5);
+  rest.forEach((f, k) => { f.delay = T_BOUQUET + k * 0.3 + rand(0, 0.1); f.grow = 2.2; });
+  const lastStart = Math.max(...flowers.map(f => f.delay));
+
+  bouquet = {
+    flowers, R,
+    vaseHue: rand(195, 250),
+    total: lastStart + 2.2 + 3 + 11 + 2.5,
+  };
+  t0 = performance.now();
+}
+
+// ------------------------------------------------------------
+//  3D helpers
+// ------------------------------------------------------------
+let theta = 0, cosT = 1, sinT = 0;
+function setTheta(a) { theta = a; cosT = Math.cos(a); sinT = Math.sin(a); }
+const rotX = (x, z) => x * cosT + z * sinT;
+const rotZ = (x, z) => -x * sinT + z * cosT;
+const X = x => cx + x * u;
+const Y = y => baseY - y * u;
+
+// point on the stem (3D bezier), rotated into view space -> [x, y, z]
+function stemPt(f, t, sway) {
+  const [ax, ay, az] = f.p0;
+  const bx = f.p2[0] + sway[0] * t, by = f.p2[1], bz = f.p2[2] + sway[1] * t;
+  const qx = ax + (bx - ax) * 0.25, qy = ay + (by - ay) * 0.6, qz = az + (bz - az) * 0.25;
+  const m = 1 - t;
+  const x = m*m*ax + 2*m*t*qx + t*t*bx;
+  const y = m*m*ay + 2*m*t*qy + t*t*by;
+  const z = m*m*az + 2*m*t*qz + t*t*bz;
+  return [rotX(x, z), y, rotZ(x, z)];
+}
+
+// ------------------------------------------------------------
+//  Drawing pieces
+// ------------------------------------------------------------
+const VP = [[0, 7], [3, 10], [9, 12], [16, 9.5], [23, 5.8], [27, 5.5], [30, 7.5]];
+function hw(y) {
+  y = clamp(y, 0, VASE_H);
+  for (let i = 0; i < VP.length - 1; i++) {
+    if (y <= VP[i + 1][0]) {
+      let k = (y - VP[i][0]) / (VP[i + 1][0] - VP[i][0]);
+      k = k * k * (3 - 2 * k);
+      return VP[i][1] + (VP[i + 1][1] - VP[i][1]) * k;
+    }
+  }
+  return VP[VP.length - 1][1];
+}
+
+function drawVase(g) {
+  if (g <= 0) return;
+  octx.save();
+  octx.beginPath();
+  octx.rect(0, Y(VASE_H * g) - 1, ow, VASE_H * g * u + 4);
+  octx.clip();
+
+  const hue = bouquet.vaseHue;
+  octx.beginPath();
+  for (let y = VASE_H; y >= 0; y--) octx.lineTo(X(-hw(y)), Y(y));
+  for (let y = 0; y <= VASE_H; y++) octx.lineTo(X(hw(y)), Y(y));
+  octx.closePath();
+  const grd = octx.createLinearGradient(X(-12), 0, X(12), 0);
+  grd.addColorStop(0, `hsl(${hue},50%,13%)`);
+  grd.addColorStop(0.3, `hsl(${hue},45%,58%)`);
+  grd.addColorStop(0.6, `hsl(${hue},45%,36%)`);
+  grd.addColorStop(1, `hsl(${hue},50%,11%)`);
+  octx.fillStyle = grd;
+  octx.fill();
+
+  // vertical stripes that travel around the vase as it turns
+  const stripes = 14;
+  octx.lineWidth = 0.55 * u;
+  octx.lineCap = 'round';
+  for (let k = 0; k < stripes; k++) {
+    const phi = (k / stripes) * Math.PI * 2 + theta;
+    const c = Math.cos(phi);
+    if (c < 0.08) continue;
+    octx.strokeStyle = k % 2
+      ? `hsla(${hue},30%,90%,${0.18 + 0.5 * c})`
+      : `hsla(${hue},60%,6%,${0.55 * c})`;
+    octx.beginPath();
+    for (let y = 1; y <= VASE_H - 1; y += 2) {
+      const x = hw(y) * Math.sin(phi);
+      y === 1 ? octx.moveTo(X(x), Y(y)) : octx.lineTo(X(x), Y(y));
+    }
+    octx.stroke();
+  }
+  // horizontal bands
+  for (const yy of [6, 15, 24]) {
+    octx.strokeStyle = `hsla(${hue},30%,88%,.5)`;
+    octx.lineWidth = 0.45 * u;
+    octx.beginPath();
+    octx.moveTo(X(-hw(yy)), Y(yy));
+    octx.quadraticCurveTo(X(0), Y(yy - 1.8), X(hw(yy)), Y(yy));
+    octx.stroke();
+  }
+  octx.restore();
+}
+
+function drawStem(f, g, sway, shade) {
+  if (g <= 0) return;
+  const steps = Math.max(2, Math.floor(40 * g));
+  octx.lineCap = 'round';
+  octx.lineWidth = (f.hero ? 0.8 : 0.95) * u;
+  octx.strokeStyle = `hsl(128,42%,${28 * shade}%)`;
+  octx.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const [x, y] = stemPt(f, i / 40, sway);
+    i ? octx.lineTo(X(x), Y(y)) : octx.moveTo(X(x), Y(y));
+  }
+  octx.stroke();
+  octx.lineWidth = 0.35 * u;
+  octx.strokeStyle = `hsl(120,55%,${50 * shade}%)`;
+  octx.stroke();
+
+  for (const lf of f.leaves) {
+    const lg = clamp((g - lf.t) / 0.25);
+    if (lg <= 0) continue;
+    const [x, y] = stemPt(f, lf.t, sway);
+    const L = lf.len * easeOut(lg) * u;
+    octx.save();
+    octx.translate(X(x), Y(y));
+    octx.rotate(-lf.side * 0.9 - 0.2);
+    if (lf.side < 0) octx.scale(-1, 1);
+    const g2 = octx.createLinearGradient(0, 0, L, 0);
+    g2.addColorStop(0, `hsl(130,55%,${22 * shade}%)`);
+    g2.addColorStop(1, `hsl(110,60%,${48 * shade}%)`);
+    octx.fillStyle = g2;
+    octx.beginPath();
+    octx.moveTo(0, 0);
+    octx.quadraticCurveTo(L * 0.5, -L * 0.38, L, 0);
+    octx.quadraticCurveTo(L * 0.5, L * 0.38, 0, 0);
+    octx.fill();
+    octx.strokeStyle = 'hsla(110,40%,15%,.7)';
+    octx.lineWidth = 0.3 * u;
+    octx.beginPath(); octx.moveTo(0, 0); octx.lineTo(L * 0.9, 0); octx.stroke();
+    octx.restore();
+  }
+}
+
+let shade = 1;
+function petalCircle(px, py, pr, hue, sat, light) {
+  const L = Math.min(88, light * shade);
+  const g = octx.createRadialGradient(px - pr * .3, py - pr * .3, pr * .1, px, py, pr);
+  g.addColorStop(0, `hsl(${hue},${sat}%,${Math.min(92, L + 22)}%)`);
+  g.addColorStop(1, `hsl(${hue},${sat}%,${Math.max(4, L - 16)}%)`);
+  octx.fillStyle = g;
+  octx.beginPath(); octx.arc(px, py, pr, 0, 6.2832); octx.fill();
+  octx.strokeStyle = `hsla(${hue},${sat}%,${Math.max(3, L - 30)}%,.8)`;
+  octx.lineWidth = 0.3 * u;
+  octx.stroke();
+}
+
+// draws a flower head centered at (0,0) of the current (already squashed) frame
+function drawHeadShape(f, bloom, r, time) {
+  const spin = f.rot + bloom * 1.6 + Math.sin(time * 0.6 + f.phase) * 0.05;
+  if (f.type === 'rose') {
+    const layers = 4;
+    for (let k = 0; k < layers; k++) {
+      const lr = r * (1 - k / layers * 0.8);
+      const n = 5;
+      for (let p = 0; p < n; p++) {
+        const a = spin + p * 6.2832 / n + k * 0.75;
+        const d = lr * 0.46;
+        petalCircle(Math.cos(a) * d, Math.sin(a) * d, lr * 0.62,
+                    f.hue + k * 3, f.sat, f.light - k * 3 + 6);
+      }
+    }
+    petalCircle(0, 0, r * 0.13, f.hue, f.sat, f.light - 20);
+  } else if (f.type === 'daisy') {
+    const n = 12, L = Math.min(88, f.light * shade);
+    for (let p = 0; p < n; p++) {
+      octx.save();
+      octx.rotate(spin + p * 6.2832 / n);
+      const g = octx.createLinearGradient(0, 0, r, 0);
+      g.addColorStop(0, `hsl(${f.hue},${f.sat}%,${Math.min(92, L + 22)}%)`);
+      g.addColorStop(1, `hsl(${f.hue},${f.sat}%,${L + 4}%)`);
+      octx.fillStyle = g;
+      octx.beginPath();
+      octx.ellipse(r * 0.62, 0, r * 0.4, r * 0.15, 0, 0, 6.2832);
+      octx.fill();
+      octx.strokeStyle = `hsla(${f.hue},${f.sat}%,${Math.max(3, L - 25)}%,.7)`;
+      octx.lineWidth = 0.25 * u; octx.stroke();
+      octx.restore();
+    }
+    petalCircle(0, 0, r * 0.28, 42, 95, 52);
+  } else {
+    for (const d of f.dots) {
+      const a = d.a + spin * 0.2;
+      petalCircle(Math.cos(a) * d.d * r * 0.8, Math.sin(a) * d.d * r * 0.8,
+                  r * d.s * easeOut(bloom), f.hue + d.h, f.sat, f.light);
+    }
+  }
+}
+
+const TILT = 0.55;                 // camera looks slightly down on the bouquet
+function drawHead(f, bloom, hx, hy, hz, sw, time) {
+  if (bloom <= 0) return;
+  // head position in view space
+  const px = rotX(f.p2[0] + sw[0], f.p2[2] + sw[1]);
+  const pz = rotZ(f.p2[0] + sw[0], f.p2[2] + sw[1]);
+  const persp = 1 + pz * 0.006;
+  const r = f.r * u * easeOut(bloom) * persp;
+
+  // flower disc is seen foreshortened depending on where it faces
+  const nx = rotX(f.n[0], f.n[2]), nz = rotZ(f.n[0], f.n[2]), ny = f.n[1];
+  const facing = ny * Math.sin(TILT) + nz * Math.cos(TILT);
+  const ratio = clamp(facing, 0.5, 1);
+  const dx = nx, dy = -(ny * Math.cos(TILT) - nz * Math.sin(TILT));
+  const alpha = Math.atan2(dy, dx);
+
+  const dz = clamp((pz + bouquet.R) / (2 * bouquet.R));
+  shade = 0.72 + 0.4 * dz;
+
+  octx.save();
+  octx.translate(X(px), Y(f.p2[1]));
+  octx.rotate(alpha);
+  octx.scale(ratio, 1);
+  octx.rotate(-alpha);
+  drawHeadShape(f, bloom, r, time);
+  octx.restore();
+  shade = 1;
+}
+
+// ------------------------------------------------------------
+//  Scene
+// ------------------------------------------------------------
+function renderScene(t, time) {
+  octx.fillStyle = '#000';
+  octx.fillRect(0, 0, ow, oh);
+
+  // rotation: eases in, then a constant 360 degree turn every SPIN_PERIOD s
+  const s = Math.max(0, t - T_SPIN), w = Math.PI * 2 / SPIN_PERIOD;
+  setTheta(w * (s < 3 ? s * s / 6 : s - 1.5));
+
+  const items = [];
+  for (const f of bouquet.flowers) {
+    const lt = t - f.delay;
+    const g = ease(clamp(lt / f.grow));
+    const bloom = clamp((lt - f.grow * 0.8) / 3);
+    const sway = [Math.sin(time * 0.0009 + f.phase) * 0.9 * g, Math.cos(time * 0.0007 + f.phase) * 0.9 * g];
+    const hz = rotZ(f.p2[0], f.p2[2]);
+    items.push({ f, g, bloom, sway, hz });
+  }
+  items.sort((a, b) => a.hz - b.hz);                       // back to front
+
+  const R = bouquet.R;
+  for (const it of items) {
+    const dz = clamp((it.hz + R) / (2 * R));
+    drawStem(it.f, it.g, it.sway, 0.7 + 0.35 * dz);
+  }
+  drawVase(ease(clamp((t - T_VASE) / T_VASE_DUR)));
+  for (const it of items) drawHead(it.f, it.bloom, 0, 0, it.hz, it.sway, time / 1000);
+}
+
+// ------------------------------------------------------------
+//  Scene -> ASCII
+// ------------------------------------------------------------
+function hash(x, y, k) {
+  let h = (x * 374761393 + y * 668265263 + k * 2147483647) | 0;
+  h = (h ^ (h >> 13)) * 1274126177;
+  return ((h ^ (h >> 16)) >>> 0) / 4294967296;
+}
+
+function toAscii(master, frame) {
+  mctx.imageSmoothingQuality = 'high';
+  sctx.imageSmoothingQuality = 'high';
+  mctx.drawImage(off, 0, 0, mid.width, mid.height);
+  sctx.drawImage(mid, 0, 0, cols, rows);
+  const data = sctx.getImageData(0, 0, cols, rows).data;
+
+  vctx.fillStyle = '#000';
+  vctx.fillRect(0, 0, W, H);
+  vctx.font = `${fs}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
+  vctx.textBaseline = 'top';
+  const ox = (W - cols * charW) / 2;
+  const oy = (H - rows * charH) / 2;
+  const last = RAMP.length - 1;
+
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const i = (y * cols + x) * 4;
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+      if (lum < 0.045) continue;
+      let idx = Math.floor(Math.pow(lum, 0.85) * last);
+      idx += Math.floor(hash(x, y, frame) * 3) - 1;
+      idx = clamp(idx, 1, last);
+      const m = Math.max(r, g, b) || 1;
+      const k = Math.min(1.9, 255 / m) * master;
+      vctx.fillStyle = `rgb(${Math.min(255, r * k) | 0},${Math.min(255, g * k) | 0},${Math.min(255, b * k) | 0})`;
+      vctx.fillText(RAMP[idx], ox + x * charW, oy + y * charH);
+    }
+  }
+}
+
+// ------------------------------------------------------------
+//  Main loop
+// ------------------------------------------------------------
+let lastDraw = 0, frame = 0;
+function loop(now) {
+  requestAnimationFrame(loop);
+  if (now - lastDraw < 33) return;
+  lastDraw = now;
+  frame++;
+  let t = (now - t0) / 1000;
+  const TOTAL = bouquet.total;
+  if (t > TOTAL) { newBouquet(); t = 0; }
+  const master = 1 - clamp((t - (TOTAL - 2.5)) / 2.5);
+  renderScene(t, now);
+  toAscii(master, frame);
+}
+
+newBouquet();
+requestAnimationFrame(loop);
+
+view.addEventListener('pointerdown', () => {
+  newBouquet();
+  document.getElementById('hint').style.opacity = 0;
+});
+setTimeout(() => { document.getElementById('hint').style.opacity = 0; }, 8000);
+</script>
+</body>
+</html>
